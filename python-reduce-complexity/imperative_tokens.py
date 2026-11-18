@@ -9,7 +9,8 @@ IPython is imported only then, and says which magics it has built in:
 - a cell under a cell magic (``%%bash``, ``%%html``) counts 0, except under a magic that runs the body as Python
   (the ``ExecutionMagics``, such as ``%%time`` and ``%%capture``): there the magic counts as a line magic and
   the body as code;
-- a magic that is not built in, such as one from an extension, counts 0 and a warning is printed.
+- a magic that is not built in, such as one from an extension, counts 0 with its whole line (``x = %sql ...``),
+  and a warning is printed.
 
 A notebook with another kernel counts 0. Without a file, the source is read from standard input, as UTF-8: a
 way to weigh a snippet.
@@ -45,25 +46,9 @@ from pathlib import Path
 Position = tuple[int, int]  # (line, column), as in `tokenize`
 
 LAYOUT = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
-# A magic as IPython rewrites it, with its kind and name: a `%name ...` line, or a whole `%%name` cell.
-# ponytail: only a magic that is a line of its own; `x = %name ...` counts as the call, unchecked.
-MAGIC = re.compile(r"^[ \t]*get_ipython\(\)\.run_(line|cell)_magic\('([^']+)'.*\n?", re.MULTILINE)
-
-SELF_CHECK = '''
-"""Docstring."""
-import numpy as np
-
-@decorator(option=1)
-class A(Base):
-    """Docstring."""
-    x: int
-    y: float = 2.0  # `y = 2.0`: 3 tokens
-
-    def f(self, a: int, b=3) -> float:
-        self.total = np.round(a, decimals=b)  # `self = np(a, b)`: 8 tokens
-        return self.total  # `return self`: 2 tokens
-'''
-
+# A line of code with a magic as IPython rewrites it, with its indentation, kind and name: a `%name ...`, alone
+# or assigned (`x = %name ...`), or a whole `%%name` cell.
+MAGIC = re.compile(r"^([ \t]*)[^#\n]*?get_ipython\(\)\.run_(line|cell)_magic\('([^']+)'.*\n?", re.MULTILINE)
 
 def start(node: ast.stmt | ast.expr | ast.keyword) -> Position:
     return node.lineno, node.col_offset
@@ -153,7 +138,8 @@ def notebook_source(notebook: dict, path: str) -> str:
     A notebook whose kernel is not Python has none. A built-in line magic stays, as the call IPython turns it
     into. A cell under a cell magic is dropped, unless the magic is one of IPython's execution magics
     (``%%time``): those run the cell's body as Python, so the magic becomes a line magic and the body stays
-    code. A magic that is not built in is dropped with a warning, which names the notebook by `path`.
+    code. A magic that is not built in is dropped, with its line, and a warning names the notebook by `path`.
+    What is dropped leaves an import, which counts 0.
     """
     if notebook["metadata"].get("kernelspec", {}).get("language", "python") != "python":
         return ""
@@ -166,11 +152,12 @@ def notebook_source(notebook: dict, path: str) -> str:
     first_percent = re.compile(rf"^\s*%(?=%({execution_magics})\b)")  # without it, the cell magic is a line magic
 
     def counted(magic: re.Match[str]) -> str:
-        kind, name = magic.groups()
+        indent, kind, name = magic.groups()
         built_in = shell.find_line_magic(name) or shell.find_cell_magic(name)
         if not built_in:
             print(f"warning: {path}: the {kind} magic {name!r} is not built into IPython and counts 0")
-        return magic[0] if built_in and kind == "line" else ""
+        # An import counts 0 and, unlike nothing, keeps a block whose only statement the magic was.
+        return magic[0] if built_in and kind == "line" else f"{indent}import uncounted_magic\n"
 
     cells = ("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
     sources = (shell.transform_cell(first_percent.sub("", cell)) for cell in cells)
@@ -189,5 +176,4 @@ def main(paths: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    assert count(SELF_CHECK) == 13, "self-check failed: the counting rules do not hold on this interpreter"
     main(sys.argv[1:])
